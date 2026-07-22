@@ -6,7 +6,8 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
-BenchmarkType = Literal["swebench_verified", "swe_explorer_edit"]
+BenchmarkType = Literal["swebench_verified", "swe_explorer_explore", "swe_explorer_edit"]
+EvaluationBackend = Literal["soma_benchmark", "command"]
 EvaluationStatus = Literal["queued", "running", "completed", "failed"]
 CaseRunStatus = Literal["completed", "failed", "timed_out"]
 LeaderboardStatus = Literal["qualified", "not_qualified", "running", "failed"]
@@ -16,7 +17,11 @@ class CompetitionCreate(BaseModel):
     name: str
     description: str = ""
     benchmark_types: list[BenchmarkType] = Field(
-        default_factory=lambda: ["swebench_verified", "swe_explorer_edit"]
+        default_factory=lambda: [
+            "swebench_verified",
+            "swe_explorer_explore",
+            "swe_explorer_edit",
+        ]
     )
     screening_threshold: float = 0.0
 
@@ -33,6 +38,8 @@ class CompetitionRead(BaseModel):
 class BenchmarkCaseInput(BaseModel):
     instance_id: str
     benchmark_type: BenchmarkType
+    dataset_name: str = ""
+    split: str = "test"
     title: str = ""
     repo: str = ""
     prompt: str
@@ -50,6 +57,14 @@ class BenchmarkCaseImportRequest(BaseModel):
     cases: list[BenchmarkCaseInput]
 
 
+class HuggingFaceCaseImportRequest(BaseModel):
+    dataset_name: str
+    benchmark_type: BenchmarkType
+    split: str = "test"
+    limit: int | None = Field(default=None, ge=1)
+    instance_ids: list[str] = Field(default_factory=list)
+
+
 class BenchmarkCaseRead(BenchmarkCaseInput):
     id: int
     competition_id: int
@@ -59,8 +74,9 @@ class BenchmarkCaseRead(BenchmarkCaseInput):
 class SubmissionCreate(BaseModel):
     miner_hotkey: str
     display_name: str = ""
-    submission_root: str
-    entry_command: str
+    submission_root: str = "."
+    entry_command: str = ""
+    compressor_path: str
     environment: dict[str, str] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -72,6 +88,7 @@ class SubmissionRead(BaseModel):
     display_name: str
     submission_root: str
     entry_command: str
+    compressor_path: str
     environment: dict[str, str]
     metadata: dict[str, Any]
     created_at: datetime
@@ -79,8 +96,13 @@ class SubmissionRead(BaseModel):
 
 class EvaluationCreate(BaseModel):
     submission_id: int
-    attempts_per_case: int = Field(default=1, ge=1, le=5)
+    backend: EvaluationBackend = "soma_benchmark"
+    attempts_per_case: int = Field(default=5, ge=5, le=5)
     timeout_seconds: float | None = Field(default=None, gt=0)
+    agent_name: str = "copilot"
+    execute: bool = True
+    swerebench_eval: bool = True
+    extra_args: list[str] = Field(default_factory=list)
 
 
 class CaseMetrics(BaseModel):

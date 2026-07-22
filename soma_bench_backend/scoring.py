@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from math import log
+from math import log, log2
 from typing import Any
 
 from .config import Settings
@@ -89,6 +89,29 @@ def compute_swe_task_score(
     return score, "main", 0.0
 
 
+def compute_explore_task_score(
+    *,
+    miner_quality: float,
+    baseline_quality: float,
+    tokens_without_compression: float | None,
+    tokens_with_compression: float | None,
+) -> float:
+    quality_margin = miner_quality - baseline_quality
+    if quality_margin <= -0.2:
+        return -2.0
+    if (
+        tokens_without_compression is None
+        or tokens_with_compression is None
+        or tokens_without_compression <= 0
+        or tokens_with_compression <= 0
+    ):
+        token_score = 0.0
+    else:
+        token_score = max(-2.0, min(2.0 * log2(tokens_without_compression / tokens_with_compression), 2.0))
+    quality_gate = 1.0 if quality_margin >= 0 else max(0.0, (quality_margin + 0.2) / 0.2)
+    return quality_gate * token_score
+
+
 def _normalized_score(raw_score: float) -> float:
     clamped = max(-4.0, min(raw_score, 3.0))
     return (2.0 * clamped + 1.0) / 7.0
@@ -124,6 +147,14 @@ def build_category_score(
     settings: Settings,
 ) -> tuple[float, dict[str, Any]]:
     task_scores: list[TaskScore] = []
+    if benchmark_type == "swe_explorer_explore":
+        return _build_explore_category_score(
+            benchmark_type=benchmark_type,
+            case_rows=case_rows,
+            case_result_rows=case_result_rows,
+            settings=settings,
+        )
+
     main_scores: list[tuple[float, float]] = []
     hard_boost_total = 0.0
 
@@ -236,6 +267,119 @@ def build_category_score(
         ],
     }
     return normalized, summary
+
+
+def _build_explore_category_score(
+    *,
+    benchmark_type: str,
+    case_rows: list[dict[str, Any]],
+    case_result_rows: dict[int, list[dict[str, Any]]],
+    settings: Settings,
+) -> tuple[float, dict[str, Any]]:
+    tasks: list[dict[str, Any]] = []
+    for case_row in case_rows:
+        runs = case_result_rows.get(case_row["id"], [])
+        completed_runs = [row for row in runs if row["status"] == "completed"]
+        tok_b = compute_weighted_tokens(
+            input_tokens=case_row["baseline_input_tokens"],
+            cached_input_tokens=case_row["baseline_cached_input_tokens"],
+            output_tokens=case_row["baseline_output_tokens"],
+            settings=settings,
+        )
+        miner_tokens = [
+            value
+            for value in (
+                compute_weighted_tokens(
+                    input_tokens=row["input_tokens"],
+                    cached_input_tokens=row["cached_input_tokens"],
+                    output_tokens=row["output_tokens"],
+                    settings=settings,
+                )
+                for row in completed_runs
+            )
+            if value is not None and value > 0
+        ]
+        tok_a = sum(miner_tokens) / len(miner_tokens) if miner_tokens else None
+        baseline_quality = _quality_from_rates(
+            hit_rate=case_row["baseline_hit_file_rate"],
+            noise_rate=case_row["baseline_noise_rate"],
+            fallback=1.0,
+        )
+        miner_quality_values = [
+            _quality_from_rates(
+                hit_rate=row["files_hit_rate"],
+                noise_rate=row["noise_rate"],
+                fallback=1.0 if bool(row["resolved"]) else 0.0,
+            )
+            for row in completed_runs
+        ]
+        miner_quality = (
+            sum(miner_quality_values) / len(miner_quality_values)
+            if miner_quality_values
+            else 0.0
+        )
+        score = compute_explore_task_score(
+            miner_quality=miner_quality,
+            baseline_quality=baseline_quality,
+            tokens_without_compression=tok_b,
+            tokens_with_compression=tok_a,
+        )
+        efficiency_ratio, efficiency_score = _efficiency_components(
+            tokens_without_compression=tok_b,
+            tokens_with_compression=tok_a,
+        )
+        tasks.append(
+            {
+                "benchmark_case_id": case_row["id"],
+                "score": score,
+                "normalized_score": max(-1.0, min(score / 2.0, 1.0)),
+                "baseline_quality": baseline_quality,
+                "miner_quality": miner_quality,
+                "quality_ratio": max(0.0, min(miner_quality / baseline_quality, 1.0))
+                if baseline_quality > 0
+                else miner_quality,
+                "efficiency_ratio": efficiency_ratio,
+                "efficiency_score": efficiency_score,
+                "tokens_without_compression": tok_b,
+                "tokens_with_compression": tok_a,
+            }
+        )
+
+    normalized = (
+        sum(task["normalized_score"] for task in tasks) / len(tasks)
+        if tasks
+        else -1.0
+    )
+    quality_score = (
+        (2.0 * (sum(task["quality_ratio"] for task in tasks) / len(tasks))) - 1.0
+        if tasks
+        else -1.0
+    )
+    efficiency_score = (
+        sum(task["efficiency_score"] for task in tasks) / len(tasks)
+        if tasks
+        else -1.0
+    )
+    return normalized, {
+        "benchmark_type": benchmark_type,
+        "task_count": len(case_rows),
+        "scored_task_count": len(tasks),
+        "normalized_score": normalized,
+        "quality_score": quality_score,
+        "efficiency_score": efficiency_score,
+        "tasks": tasks,
+    }
+
+
+def _quality_from_rates(
+    *,
+    hit_rate: float | None,
+    noise_rate: float | None,
+    fallback: float,
+) -> float:
+    if hit_rate is None:
+        return fallback
+    return max(-1.0, min(float(hit_rate) - float(noise_rate or 0.0), 1.0))
 
 
 def build_leaderboard_entry(

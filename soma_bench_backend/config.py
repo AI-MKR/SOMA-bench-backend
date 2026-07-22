@@ -14,6 +14,11 @@ class Settings:
     runs_dir: Path
     default_timeout_seconds: float
     max_attempts_per_case: int
+    default_attempts_per_case: int
+    soma_benchmark_repo: Path | None
+    soma_benchmark_runner: str
+    default_agent_name: str
+    default_split: str
     input_token_weight: float
     cached_input_token_weight: float
     output_token_weight: float
@@ -30,6 +35,7 @@ def get_settings() -> Settings:
     data_dir.mkdir(parents=True, exist_ok=True)
     runs_dir.mkdir(parents=True, exist_ok=True)
 
+    repo_raw = os.getenv("SOMA_BENCHMARK_REPO", "").strip()
     return Settings(
         app_name="SOMA Local Benchmark Backend",
         data_dir=data_dir,
@@ -41,6 +47,13 @@ def get_settings() -> Settings:
         max_attempts_per_case=max(
             1, int(os.getenv("SOMA_BENCH_MAX_ATTEMPTS_PER_CASE", "5"))
         ),
+        default_attempts_per_case=max(
+            1, int(os.getenv("SOMA_BENCH_DEFAULT_ATTEMPTS_PER_CASE", "5"))
+        ),
+        soma_benchmark_repo=Path(repo_raw).expanduser().resolve() if repo_raw else None,
+        soma_benchmark_runner=os.getenv("SOMA_BENCHMARK_RUNNER", "uv run python -m soma_bench"),
+        default_agent_name=os.getenv("SOMA_BENCH_DEFAULT_AGENT_NAME", "copilot"),
+        default_split=os.getenv("SOMA_BENCH_DEFAULT_SPLIT", "test"),
         input_token_weight=float(os.getenv("SOMA_BENCH_INPUT_TOKEN_WEIGHT", "1.0")),
         cached_input_token_weight=float(
             os.getenv("SOMA_BENCH_CACHED_INPUT_TOKEN_WEIGHT", "0.1")

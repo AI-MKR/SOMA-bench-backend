@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import threading
 import traceback
@@ -65,6 +66,11 @@ class LocalBenchmarkExecutor:
             run_dir.mkdir(parents=True, exist_ok=True)
 
             for case_row in case_rows:
+                case_row = self._ensure_case_baseline(
+                    case_row=case_row,
+                    timeout_seconds=evaluation_row["timeout_seconds"],
+                    run_dir=run_dir,
+                )
                 for attempt_index in range(1, evaluation_row["attempts_per_case"] + 1):
                     self._run_case_attempt(
                         evaluation_id=evaluation_id,
@@ -73,9 +79,15 @@ class LocalBenchmarkExecutor:
                         timeout_seconds=evaluation_row["timeout_seconds"],
                         attempt_index=attempt_index,
                         run_dir=run_dir,
+                        run_label="miner",
+                        baseline=False,
+                        store_result=True,
                     )
 
             with db.connect(self.settings) as connection:
+                case_rows = db.list_benchmark_cases(
+                    connection, competition_row["id"]
+                )
                 result_rows = db.list_case_results(connection, evaluation_id)
                 leaderboard_entry = build_leaderboard_entry(
                     competition_row=competition_row,
@@ -109,15 +121,16 @@ class LocalBenchmarkExecutor:
         self,
         *,
         evaluation_id: int,
-        submission_row: dict[str, Any],
+        submission_row: dict[str, Any] | None,
         case_row: dict[str, Any],
         timeout_seconds: float,
         attempt_index: int,
         run_dir: Path,
-    ) -> None:
-        case_dir = run_dir / case_row["benchmark_type"] / case_row["instance_id"] / str(
-            attempt_index
-        )
+        run_label: str,
+        baseline: bool,
+        store_result: bool,
+    ) -> dict[str, Any]:
+        case_dir = run_dir / run_label / case_row["benchmark_type"] / case_row["instance_id"] / str(attempt_index)
         case_dir.mkdir(parents=True, exist_ok=True)
         case_payload_path = case_dir / "case.json"
         result_payload_path = case_dir / "result.json"
@@ -170,9 +183,15 @@ class LocalBenchmarkExecutor:
         noise_rate = None
 
         try:
+            command, command_cwd = self._build_command(
+                submission_row=submission_row,
+                case_row=case_row,
+                case_dir=case_dir,
+                baseline=baseline,
+            )
             completed = subprocess.run(
-                submission_row["entry_command"],
-                cwd=submission_row["submission_root"],
+                command,
+                cwd=command_cwd,
                 env=env,
                 shell=True,
                 text=True,
@@ -184,6 +203,7 @@ class LocalBenchmarkExecutor:
             raw_result = self._load_result_payload(
                 result_payload_path=result_payload_path,
                 stdout_text=completed.stdout or "",
+                case_dir=case_dir,
             )
             resolved = bool(raw_result.get("resolved"))
             metrics = raw_result.get("metrics") or {}
@@ -209,25 +229,86 @@ class LocalBenchmarkExecutor:
             status = "failed"
             error_text = f"{type(exc).__name__}: {exc}"
 
-        with db.connect(self.settings) as connection:
-            db.insert_case_result(
-                connection,
-                evaluation_id=evaluation_id,
-                benchmark_case_id=case_row["id"],
+        result = {
+            "status": status,
+            "resolved": resolved,
+            "input_tokens": input_tokens,
+            "cached_input_tokens": cached_input_tokens,
+            "output_tokens": output_tokens,
+            "duration_seconds": duration_seconds,
+            "files_hit_rate": files_hit_rate,
+            "noise_rate": noise_rate,
+            "patch_path": str(patch_path),
+            "stdout_path": str(stdout_path),
+            "stderr_path": str(stderr_path),
+            "error_text": error_text,
+            "raw_result": raw_result,
+        }
+
+        if store_result:
+            with db.connect(self.settings) as connection:
+                db.insert_case_result(
+                    connection,
+                    evaluation_id=evaluation_id,
+                    benchmark_case_id=case_row["id"],
+                    attempt_index=attempt_index,
+                    status=status,
+                    resolved=resolved,
+                    input_tokens=input_tokens,
+                    cached_input_tokens=cached_input_tokens,
+                    output_tokens=output_tokens,
+                    duration_seconds=duration_seconds,
+                    files_hit_rate=files_hit_rate,
+                    noise_rate=noise_rate,
+                    patch_path=str(patch_path),
+                    stdout_path=str(stdout_path),
+                    stderr_path=str(stderr_path),
+                    error_text=error_text,
+                    raw_result=raw_result,
+                )
+        return result
+
+    def _ensure_case_baseline(
+        self,
+        *,
+        case_row: dict[str, Any],
+        timeout_seconds: float,
+        run_dir: Path,
+    ) -> dict[str, Any]:
+        if (
+            case_row["baseline_input_tokens"] is not None
+            and case_row["baseline_output_tokens"] is not None
+        ):
+            return case_row
+
+        baseline_results = [
+            self._run_case_attempt(
+                evaluation_id=0,
+                submission_row=None,
+                case_row=case_row,
+                timeout_seconds=timeout_seconds,
                 attempt_index=attempt_index,
-                status=status,
-                resolved=resolved,
-                input_tokens=input_tokens,
-                cached_input_tokens=cached_input_tokens,
-                output_tokens=output_tokens,
-                duration_seconds=duration_seconds,
-                files_hit_rate=files_hit_rate,
-                noise_rate=noise_rate,
-                patch_path=str(patch_path),
-                stdout_path=str(stdout_path),
-                stderr_path=str(stderr_path),
-                error_text=error_text,
-                raw_result=raw_result,
+                run_dir=run_dir,
+                run_label="baseline",
+                baseline=True,
+                store_result=False,
+            )
+            for attempt_index in range(1, self.settings.default_attempts_per_case + 1)
+        ]
+        resolved_count = sum(1 for result in baseline_results if result["resolved"])
+        with db.connect(self.settings) as connection:
+            return db.update_benchmark_case_baseline(
+                connection,
+                benchmark_case_id=case_row["id"],
+                baseline_resolved_count=resolved_count,
+                baseline_input_tokens=_average_int(result["input_tokens"] for result in baseline_results),
+                baseline_cached_input_tokens=_average_int(
+                    result["cached_input_tokens"] for result in baseline_results
+                ),
+                baseline_output_tokens=_average_int(result["output_tokens"] for result in baseline_results),
+                baseline_duration_seconds=_average_float(
+                    result["duration_seconds"] for result in baseline_results
+                ),
             )
 
     @staticmethod
@@ -235,9 +316,14 @@ class LocalBenchmarkExecutor:
         *,
         result_payload_path: Path,
         stdout_text: str,
+        case_dir: Path,
     ) -> dict[str, Any]:
         if result_payload_path.is_file():
             return json.loads(result_payload_path.read_text(encoding="utf-8"))
+
+        parsed = _parse_soma_benchmark_result(case_dir)
+        if parsed:
+            return parsed
 
         stdout_text = stdout_text.strip()
         if not stdout_text:
@@ -255,3 +341,153 @@ class LocalBenchmarkExecutor:
         if value is None:
             return None
         return float(value)
+
+    def _build_command(
+        self,
+        *,
+        submission_row: dict[str, Any] | None,
+        case_row: dict[str, Any],
+        case_dir: Path,
+        baseline: bool,
+    ) -> tuple[str, str]:
+        if submission_row is not None and submission_row["entry_command"].strip():
+            return submission_row["entry_command"], submission_row["submission_root"]
+
+        if self.settings.soma_benchmark_repo is None:
+            raise RuntimeError(
+                "SOMA_BENCHMARK_REPO must point to a local DendriteHQ/SOMA-benchmark checkout."
+            )
+
+        dataset_name = case_row["dataset_name"] or _default_dataset_name(case_row["benchmark_type"])
+        command = shlex.split(self.settings.soma_benchmark_runner)
+        command.extend(
+            [
+                "benchmark-solve",
+                "--agent-name",
+                self.settings.default_agent_name,
+                "--benchmark",
+                dataset_name,
+                "--instance-id",
+                case_row["instance_id"],
+                "--benchmark-type",
+                case_row["benchmark_type"],
+                "--output-dir",
+                str(case_dir / "soma-benchmark"),
+            ]
+        )
+        if not baseline:
+            if submission_row is None:
+                raise RuntimeError("Miner submission is required for compressed evaluation.")
+            command.extend(["--copilot-compression-script-path", submission_row["compressor_path"]])
+        command.extend(["--execute", "--swerebench-eval"])
+        return (
+            " ".join(shlex.quote(part) for part in command),
+            str(self.settings.soma_benchmark_repo),
+        )
+
+
+def _default_dataset_name(benchmark_type: str) -> str:
+    if benchmark_type == "swebench_verified":
+        return "SWE-bench/SWE-bench_Verified"
+    return "SWE-Explore-Bench/SWE-Explore-Bench"
+
+
+def _parse_soma_benchmark_result(case_dir: Path) -> dict[str, Any]:
+    bench_dir = case_dir / "soma-benchmark"
+    output_jsonl = bench_dir / "output.jsonl"
+    rows: list[dict[str, Any]] = []
+    if output_jsonl.is_file():
+        for line in output_jsonl.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                rows.append(json.loads(line))
+
+    row = rows[-1] if rows else {}
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    token_usage = metadata.get("token_usage") if isinstance(metadata.get("token_usage"), dict) else {}
+    patch_eval = _load_json(bench_dir / "evaluation-summary.json")
+    patch_capture = metadata.get("patch_capture") if isinstance(metadata.get("patch_capture"), dict) else {}
+
+    resolved = bool(patch_eval.get("resolved")) if patch_eval else bool(row.get("resolved", False))
+    input_tokens = _first_int(
+        token_usage,
+        "input_tokens",
+        "prompt_tokens",
+        "total_input_tokens",
+    )
+    cached_input_tokens = _cached_input_tokens(token_usage)
+    output_tokens = _first_int(
+        token_usage,
+        "output_tokens",
+        "completion_tokens",
+        "total_output_tokens",
+    )
+
+    patch_path = patch_capture.get("patch_path") if isinstance(patch_capture.get("patch_path"), str) else ""
+    patch_text = ""
+    if patch_path and Path(patch_path).is_file():
+        patch_text = Path(patch_path).read_text(encoding="utf-8")
+
+    return {
+        "resolved": resolved,
+        "patch": patch_text,
+        "metrics": {
+            "input_tokens": input_tokens,
+            "cached_input_tokens": cached_input_tokens,
+            "output_tokens": output_tokens,
+            "duration_seconds": _first_float(metadata, "duration_seconds", "elapsed_seconds"),
+            "files_hit_rate": _first_float(metadata, "files_hit_rate", "hit_file_rate"),
+            "noise_rate": _first_float(metadata, "noise_rate"),
+        },
+        "artifacts": {
+            "soma_benchmark_output": row,
+            "evaluation_summary": patch_eval,
+            "output_jsonl": str(output_jsonl),
+        },
+    }
+
+
+def _load_json(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _first_int(data: dict[str, Any], *keys: str) -> int | None:
+    for key in keys:
+        value = data.get(key)
+        if value is not None:
+            return int(value)
+    return None
+
+
+def _first_float(data: dict[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        value = data.get(key)
+        if value is not None:
+            return float(value)
+    return None
+
+
+def _cached_input_tokens(data: dict[str, Any]) -> int | None:
+    direct = _first_int(data, "cached_input_tokens", "total_cached_input_tokens")
+    if direct is not None:
+        return direct
+    cache_read = data.get("cache_read_tokens")
+    cache_creation = data.get("cache_creation_tokens")
+    if cache_read is None and cache_creation is None:
+        return None
+    return int(cache_read or 0) + int(cache_creation or 0)
+
+
+def _average_int(values: Any) -> int | None:
+    filtered = [int(value) for value in values if value is not None]
+    if not filtered:
+        return None
+    return int(round(sum(filtered) / len(filtered)))
+
+
+def _average_float(values: Any) -> float | None:
+    filtered = [float(value) for value in values if value is not None]
+    if not filtered:
+        return None
+    return sum(filtered) / len(filtered)

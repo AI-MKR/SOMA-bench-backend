@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, HTTPException, status
 
@@ -33,6 +35,7 @@ from .schemas import (
     DashboardMetrics,
     DashboardPayload,
     DashboardValidator,
+    HuggingFaceCaseImportRequest,
     LeaderboardEntry,
     SubmissionCreate,
     SubmissionRead,
@@ -102,6 +105,77 @@ def import_cases_endpoint(
     return [BenchmarkCaseRead.model_validate(row) for row in rows]
 
 
+@app.post(
+    "/competitions/{competition_id}/cases/import-huggingface",
+    response_model=list[BenchmarkCaseRead],
+)
+def import_huggingface_cases_endpoint(
+    competition_id: int,
+    payload: HuggingFaceCaseImportRequest,
+) -> list[BenchmarkCaseRead]:
+    try:
+        from datasets import load_dataset
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Install project dependencies so the datasets package is available.",
+        ) from exc
+
+    dataset = load_dataset(payload.dataset_name, split=payload.split)
+    wanted_ids = set(payload.instance_ids)
+    cases = []
+    for row in dataset:
+        instance_id = str(row.get("instance_id") or row.get("id") or "").strip()
+        if not instance_id:
+            continue
+        if wanted_ids and instance_id not in wanted_ids:
+            continue
+        prompt = str(
+            row.get("problem_statement")
+            or row.get("prompt")
+            or row.get("issue")
+            or row.get("text")
+            or ""
+        )
+        repo = str(row.get("repo") or row.get("repository") or "")
+        metadata = _jsonable(dict(row))
+        cases.append(
+            {
+                "instance_id": instance_id,
+                "benchmark_type": payload.benchmark_type,
+                "dataset_name": payload.dataset_name,
+                "split": payload.split,
+                "title": str(row.get("title") or instance_id),
+                "repo": repo,
+                "prompt": prompt,
+                "baseline_resolved_count": int(row.get("baseline_resolved_count") or 5),
+                "baseline_input_tokens": _optional_int(row.get("baseline_input_tokens")),
+                "baseline_cached_input_tokens": _optional_int(row.get("baseline_cached_input_tokens")),
+                "baseline_output_tokens": _optional_int(row.get("baseline_output_tokens")),
+                "baseline_duration_seconds": _optional_float(row.get("baseline_duration_seconds")),
+                "baseline_hit_file_rate": _optional_float(row.get("baseline_hit_file_rate")),
+                "baseline_noise_rate": _optional_float(row.get("baseline_noise_rate")),
+                "metadata": metadata,
+            }
+        )
+        if payload.limit is not None and len(cases) >= payload.limit:
+            break
+
+    if not cases:
+        raise HTTPException(status_code=400, detail="No benchmark cases matched import request.")
+
+    with connect(settings) as db:
+        competition = get_competition(db, competition_id)
+        if competition is None:
+            raise HTTPException(status_code=404, detail="Competition not found.")
+        rows = import_benchmark_cases(
+            db,
+            competition_id=competition_id,
+            cases=cases,
+        )
+    return [BenchmarkCaseRead.model_validate(row) for row in rows]
+
+
 @app.get(
     "/competitions/{competition_id}/cases",
     response_model=list[BenchmarkCaseRead],
@@ -130,6 +204,12 @@ def create_submission_endpoint(
             status_code=400,
             detail="submission_root must be an existing directory.",
         )
+    compressor_path = Path(payload.compressor_path).expanduser().resolve()
+    if not compressor_path.is_file():
+        raise HTTPException(
+            status_code=400,
+            detail="compressor_path must be an existing Python file.",
+        )
     with connect(settings) as db:
         competition = get_competition(db, competition_id)
         if competition is None:
@@ -141,6 +221,7 @@ def create_submission_endpoint(
             display_name=payload.display_name,
             submission_root=submission_root,
             entry_command=payload.entry_command,
+            compressor_path=compressor_path,
             environment=payload.environment,
             metadata=payload.metadata,
         )
@@ -170,7 +251,7 @@ def create_evaluation_endpoint(
     payload: EvaluationCreate,
 ) -> EvaluationRead:
     timeout_seconds = payload.timeout_seconds or settings.default_timeout_seconds
-    attempts_per_case = min(payload.attempts_per_case, settings.max_attempts_per_case)
+    attempts_per_case = 5
     with connect(settings) as db:
         competition = get_competition(db, competition_id)
         if competition is None:
@@ -253,3 +334,19 @@ def get_dashboard_endpoint(competition_id: int) -> DashboardPayload:
         "leaderboard": leaderboard,
     }
     return DashboardPayload.model_validate(payload)
+
+
+def _jsonable(value: Any) -> Any:
+    return json.loads(json.dumps(value, default=str))
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    return int(value)
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    return float(value)

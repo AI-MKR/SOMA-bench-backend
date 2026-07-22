@@ -96,6 +96,8 @@ def init_db(settings: Settings) -> None:
               competition_id INTEGER NOT NULL REFERENCES competitions(id) ON DELETE CASCADE,
               instance_id TEXT NOT NULL,
               benchmark_type TEXT NOT NULL,
+              dataset_name TEXT NOT NULL DEFAULT '',
+              split TEXT NOT NULL DEFAULT 'test',
               title TEXT NOT NULL DEFAULT '',
               repo TEXT NOT NULL DEFAULT '',
               prompt TEXT NOT NULL,
@@ -118,6 +120,7 @@ def init_db(settings: Settings) -> None:
               display_name TEXT NOT NULL DEFAULT '',
               submission_root TEXT NOT NULL,
               entry_command TEXT NOT NULL,
+              compressor_path TEXT NOT NULL DEFAULT '',
               environment_json TEXT NOT NULL DEFAULT '{}',
               metadata_json TEXT NOT NULL DEFAULT '{}',
               created_at TEXT NOT NULL
@@ -180,6 +183,9 @@ def init_db(settings: Settings) -> None:
         )
         _ensure_column(db, "leaderboard_scores", "quality_score", "REAL NOT NULL DEFAULT -1")
         _ensure_column(db, "leaderboard_scores", "efficiency_score", "REAL NOT NULL DEFAULT -1")
+        _ensure_column(db, "benchmark_cases", "dataset_name", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(db, "benchmark_cases", "split", "TEXT NOT NULL DEFAULT 'test'")
+        _ensure_column(db, "submissions", "compressor_path", "TEXT NOT NULL DEFAULT ''")
 
 
 def _ensure_column(
@@ -255,6 +261,8 @@ def import_benchmark_cases(
               competition_id,
               instance_id,
               benchmark_type,
+              dataset_name,
+              split,
               title,
               repo,
               prompt,
@@ -267,9 +275,11 @@ def import_benchmark_cases(
               baseline_noise_rate,
               metadata_json,
               created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(competition_id, instance_id, benchmark_type)
             DO UPDATE SET
+              dataset_name = excluded.dataset_name,
+              split = excluded.split,
               title = excluded.title,
               repo = excluded.repo,
               prompt = excluded.prompt,
@@ -286,6 +296,8 @@ def import_benchmark_cases(
                 competition_id,
                 case["instance_id"],
                 case["benchmark_type"],
+                case.get("dataset_name", ""),
+                case.get("split", "test"),
                 case.get("title", ""),
                 case.get("repo", ""),
                 case["prompt"],
@@ -318,6 +330,42 @@ def list_benchmark_cases(
     return [_case_from_row(row) for row in rows]
 
 
+def update_benchmark_case_baseline(
+    db: sqlite3.Connection,
+    *,
+    benchmark_case_id: int,
+    baseline_resolved_count: int,
+    baseline_input_tokens: int | None,
+    baseline_cached_input_tokens: int | None,
+    baseline_output_tokens: int | None,
+    baseline_duration_seconds: float | None,
+) -> dict[str, Any]:
+    db.execute(
+        """
+        UPDATE benchmark_cases
+        SET baseline_resolved_count = ?,
+            baseline_input_tokens = ?,
+            baseline_cached_input_tokens = ?,
+            baseline_output_tokens = ?,
+            baseline_duration_seconds = ?
+        WHERE id = ?
+        """,
+        (
+            baseline_resolved_count,
+            baseline_input_tokens,
+            baseline_cached_input_tokens,
+            baseline_output_tokens,
+            baseline_duration_seconds,
+            benchmark_case_id,
+        ),
+    )
+    row = db.execute(
+        "SELECT * FROM benchmark_cases WHERE id = ?",
+        (benchmark_case_id,),
+    ).fetchone()
+    return _case_from_row(row)
+
+
 def create_submission(
     db: sqlite3.Connection,
     *,
@@ -326,6 +374,7 @@ def create_submission(
     display_name: str,
     submission_root: Path,
     entry_command: str,
+    compressor_path: Path,
     environment: dict[str, str],
     metadata: dict[str, Any],
 ) -> dict[str, Any]:
@@ -338,10 +387,11 @@ def create_submission(
           display_name,
           submission_root,
           entry_command,
+          compressor_path,
           environment_json,
           metadata_json,
           created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             competition_id,
@@ -349,6 +399,7 @@ def create_submission(
             display_name,
             str(submission_root),
             entry_command,
+            str(compressor_path),
             json.dumps(environment),
             json.dumps(metadata),
             created_at,

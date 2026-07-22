@@ -52,22 +52,42 @@ From the current public code and dashboard:
   - `swe_explorer_edit`
 - scoring mixes quality and efficiency via weighted token usage
 
-## Local submission contract
+## Miner compressor contract
 
-Each local miner submission is registered with:
+The miner code being evaluated is a context compressor. It is called between the
+agent and the model during a SOMA-benchmark run.
+
+Expected miner file:
+
+```python
+def compress_messages(messages=None, path=None, metadata=None) -> list:
+    return messages if isinstance(messages, list) else []
+```
+
+The backend registers each miner submission with:
 
 - `submission_root`: working directory
-- `entry_command`: shell command executed for each benchmark case
+- `compressor_path`: Python file exposing `compress_messages(...)`
+- `entry_command`: optional override for custom command-mode evaluation
 
-For every benchmark case the backend writes:
+Normal SOMA-style evaluation does not call `entry_command`. It runs:
 
-- case payload JSON to `SOMA_BENCH_CASE_PATH`
-- expected result JSON path to `SOMA_BENCH_RESULT_PATH`
+```bash
+uv run python -m soma_bench benchmark-solve \
+  --agent-name copilot \
+  --benchmark DATASET \
+  --instance-id INSTANCE_ID \
+  --benchmark-type BENCHMARK_TYPE \
+  --execute \
+  --swerebench-eval \
+  --copilot-compression-script-path /path/to/miner.py
+```
 
-The miner command should produce a JSON result either by writing to
-`SOMA_BENCH_RESULT_PATH` or by printing JSON to stdout.
+The command is executed inside the local `DendriteHQ/SOMA-benchmark` checkout
+configured by `SOMA_BENCHMARK_REPO`.
 
-Expected result shape:
+The older command-mode path is still supported for custom local experiments. In
+that mode the command should write this result shape:
 
 ```json
 {
@@ -98,6 +118,8 @@ Each case should include:
 
 - `instance_id`
 - `benchmark_type`
+- `dataset_name`
+- `split`
 - `prompt`
 - baseline quality count:
   - `baseline_resolved_count`
@@ -114,6 +136,8 @@ Minimal example:
     {
       "instance_id": "django__django-12345",
       "benchmark_type": "swebench_verified",
+      "dataset_name": "SWE-bench/SWE-bench_Verified",
+      "split": "test",
       "title": "Fix failing admin filter behavior",
       "repo": "django/django",
       "prompt": "Problem statement here",
@@ -126,12 +150,38 @@ Minimal example:
 }
 ```
 
+You can also import directly from Hugging Face:
+
+```http
+POST /competitions/1/cases/import-huggingface
+```
+
+```json
+{
+  "dataset_name": "SWE-bench/SWE-bench_Verified",
+  "benchmark_type": "swebench_verified",
+  "split": "test",
+  "limit": 10
+}
+```
+
+For SWE-Explore:
+
+```json
+{
+  "dataset_name": "SWE-Explore-Bench/SWE-Explore-Bench",
+  "benchmark_type": "swe_explorer_explore",
+  "split": "test"
+}
+```
+
 ## API overview
 
 - `GET /health`
 - `POST /competitions`
 - `GET /competitions`
 - `POST /competitions/{competition_id}/cases/import`
+- `POST /competitions/{competition_id}/cases/import-huggingface`
 - `GET /competitions/{competition_id}/cases`
 - `POST /competitions/{competition_id}/submissions`
 - `GET /competitions/{competition_id}/submissions`
@@ -158,6 +208,9 @@ Override with:
 
 - `SOMA_BENCH_DATA_DIR`
 - `SOMA_BENCH_DB_PATH`
+- `SOMA_BENCHMARK_REPO`
+- `SOMA_BENCHMARK_RUNNER`
+- `SOMA_BENCH_DEFAULT_AGENT_NAME`
 
 ## Notes on scoring
 
@@ -177,6 +230,18 @@ This backend uses the public SWE scoring formulas documented in SOMA's
 - `quality_score` is a normalized resolution score based on miner resolved
   attempts versus baseline resolved counts
 - `efficiency_score` is a normalized weighted-token savings score
+
+Each benchmark problem is evaluated exactly 5 miner attempts. If baseline token
+metrics are missing, the backend first runs the same problem 5 times without the
+miner compressor and caches those baseline metrics on the benchmark case.
+
+For `swe_explorer_explore`, quality uses exploration metrics when available:
+
+```text
+quality = files_hit_rate - noise_rate
+```
+
+Token savings are only rewarded when exploration quality is preserved.
 
 ## Suggested next step
 
