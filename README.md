@@ -299,3 +299,24 @@ Example shape:
   }
 }
 ```
+
+## Evaluation logs
+
+The backend records important evaluation events in SQLite while a run is executing. Use:
+
+```http
+GET /evaluations/{evaluation_id}/logs
+```
+
+Events include:
+
+- `evaluation_started`
+- `case_started`
+- `baseline_started`
+- `baseline_finished`
+- `attempt_started`
+- `attempt_finished`
+- `evaluation_scored`
+- `evaluation_failed`
+
+Each log row has `level`, `event`, `message`, `details`, and `created_at`. Full raw stdout/stderr stays in the artifact paths referenced from `details`.

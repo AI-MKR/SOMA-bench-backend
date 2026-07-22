@@ -55,6 +55,13 @@ def _evaluation_from_row(row: dict[str, Any]) -> dict[str, Any]:
     return row
 
 
+def _evaluation_log_from_row(row: dict[str, Any]) -> dict[str, Any]:
+    row = dict(row)
+    row["details"] = _loads(row["details_json"], {})
+    del row["details_json"]
+    return row
+
+
 def _leaderboard_from_row(row: dict[str, Any]) -> dict[str, Any]:
     row = dict(row)
     row["screener_passed"] = bool(row["screener_passed"])
@@ -171,6 +178,16 @@ def init_db(settings: Settings) -> None:
               raw_result_json TEXT NOT NULL DEFAULT '{}',
               created_at TEXT NOT NULL,
               UNIQUE(evaluation_id, benchmark_case_id, attempt_index)
+            );
+
+            CREATE TABLE IF NOT EXISTS evaluation_logs (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              evaluation_id INTEGER NOT NULL REFERENCES evaluations(id) ON DELETE CASCADE,
+              level TEXT NOT NULL,
+              event TEXT NOT NULL,
+              message TEXT NOT NULL,
+              details_json TEXT NOT NULL DEFAULT '{}',
+              created_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS leaderboard_scores (
@@ -572,6 +589,57 @@ def fail_evaluation(
             evaluation_id,
         ),
     )
+
+
+def insert_evaluation_log(
+    db: sqlite3.Connection,
+    *,
+    evaluation_id: int,
+    level: str,
+    event: str,
+    message: str,
+    details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    cursor = db.execute(
+        """
+        INSERT INTO evaluation_logs (
+          evaluation_id,
+          level,
+          event,
+          message,
+          details_json,
+          created_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            evaluation_id,
+            level,
+            event,
+            message,
+            json.dumps(details or {}),
+            utc_now(),
+        ),
+    )
+    row = db.execute(
+        "SELECT * FROM evaluation_logs WHERE id = ?",
+        (int(cursor.lastrowid),),
+    ).fetchone()
+    return _evaluation_log_from_row(row)
+
+
+def list_evaluation_logs(
+    db: sqlite3.Connection,
+    evaluation_id: int,
+) -> list[dict[str, Any]]:
+    rows = db.execute(
+        """
+        SELECT * FROM evaluation_logs
+        WHERE evaluation_id = ?
+        ORDER BY id ASC
+        """,
+        (evaluation_id,),
+    ).fetchall()
+    return [_evaluation_log_from_row(row) for row in rows]
 
 
 def insert_case_result(

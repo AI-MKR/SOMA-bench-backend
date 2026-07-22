@@ -21,6 +21,7 @@ from .db import (
     init_db,
     list_benchmark_cases,
     list_competitions,
+    list_evaluation_logs,
     list_latest_evaluations,
     list_leaderboard,
     list_submissions,
@@ -32,6 +33,7 @@ from .schemas import (
     CompetitionCreate,
     CompetitionRead,
     EvaluationCreate,
+    EvaluationLogRead,
     EvaluationRead,
     DashboardMetrics,
     DashboardPayload,
@@ -286,6 +288,16 @@ def get_evaluation_endpoint(evaluation_id: int) -> EvaluationRead:
         if row is None:
             raise HTTPException(status_code=404, detail="Evaluation not found.")
     return EvaluationRead.model_validate(_with_evaluation_state(row))
+
+
+@app.get("/evaluations/{evaluation_id}/logs", response_model=list[EvaluationLogRead])
+def list_evaluation_logs_endpoint(evaluation_id: int) -> list[EvaluationLogRead]:
+    with connect(settings) as db:
+        row = get_evaluation(db, evaluation_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Evaluation not found.")
+        rows = list_evaluation_logs(db, evaluation_id)
+    return [EvaluationLogRead.model_validate(row) for row in rows]
 
 
 @app.get(

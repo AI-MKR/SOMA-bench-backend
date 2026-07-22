@@ -142,6 +142,16 @@ class EvaluationRead(BaseModel):
     updated_at: datetime
 
 
+class EvaluationLogRead(BaseModel):
+    id: int
+    evaluation_id: int
+    level: str
+    event: str
+    message: str
+    details: dict[str, Any]
+    created_at: datetime
+
+
 class LeaderboardEntry(BaseModel):
     competition_id: int
     submission_id: int
