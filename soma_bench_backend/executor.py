@@ -162,7 +162,8 @@ class LocalBenchmarkExecutor:
         )
 
         env = os.environ.copy()
-        env.update(submission_row["environment"])
+        if submission_row is not None:
+            env.update(submission_row["environment"])
         env["SOMA_BENCH_CASE_PATH"] = str(case_payload_path)
         env["SOMA_BENCH_RESULT_PATH"] = str(result_payload_path)
         env["SOMA_BENCH_EVALUATION_ID"] = str(evaluation_id)

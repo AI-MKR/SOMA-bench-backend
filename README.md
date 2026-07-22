@@ -248,3 +248,50 @@ Token savings are only rewarded when exploration quality is preserved.
 Populate a competition with real SWE-bench-style cases and baseline metrics from
 your local SOMA benchmark data, then point miner submissions at a wrapper
 command that emits the result JSON described above.
+
+## Dashboard-style miner detail output
+
+Leaderboard rows returned by `GET /competitions/{competition_id}/dashboard` include SOMA-style miner detail metrics under `summary`.
+
+Key fields:
+
+- `summary.screener`: pass/fail status for the submission, including failure reason when available.
+- `summary.tasks`: number of benchmark tasks included in the score.
+- `summary.passed_without_compression`: baseline pass count across all attempts.
+- `summary.passed_with_compression`: compressed-miner pass count across all attempts.
+- `summary.tokens_without_compression`: aggregate baseline token usage with `input`, `cache`, `output`, and weighted total.
+- `summary.tokens_with_compression`: aggregate compressed token usage with `input`, `cache`, `output`, and weighted total.
+- `summary.baseline_weighted`: weighted token total without compression.
+- `summary.total_weighted`: weighted token total with compression.
+- `summary.evaluation_details.task_details`: per-task rows with instance id, benchmark type, attempts, pass counts, token breakdowns, x/y quality inputs, pool, hard boost, and final task score.
+
+Example shape:
+
+```json
+{
+  "summary": {
+    "screener": {"passed": true, "status": "passed", "reason": null},
+    "tasks": 10,
+    "passed_without_compression": 48,
+    "passed_with_compression": 45,
+    "tokens_without_compression": {"input": 1000000, "cache": 0, "output": 50000, "weighted": 1050000},
+    "tokens_with_compression": {"input": 420000, "cache": 0, "output": 52000, "weighted": 472000},
+    "baseline_weighted": 1050000,
+    "total_weighted": 472000,
+    "evaluation_details": {
+      "task_details": [
+        {
+          "instance_id": "django__django-11551",
+          "passed_without_compression": 5,
+          "passed_with_compression": 4,
+          "tokens_without_compression": {"input": 100000, "cache": 0, "output": 5000, "weighted": 105000},
+          "tokens_with_compression": {"input": 42000, "cache": 0, "output": 5200, "weighted": 47200},
+          "total_weighted": 47200,
+          "baseline_weighted": 105000,
+          "score": 0.72
+        }
+      ]
+    }
+  }
+}
+```

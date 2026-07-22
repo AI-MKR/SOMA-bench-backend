@@ -11,11 +11,15 @@ from .config import Settings
 @dataclass
 class TaskScore:
     benchmark_case_id: int
+    instance_id: str
     benchmark_type: str
     x: int
     y: int
+    attempts: int
     tokens_without_compression: float | None
     tokens_with_compression: float | None
+    baseline_tokens: dict[str, float | int | None]
+    compressed_tokens: dict[str, float | int | None]
     score: float | None
     pool: str
     hard_boost: float
@@ -139,6 +143,76 @@ def _efficiency_components(
     return ratio, max(-1.0, min(_compression_ratio(tokens_without_compression, tokens_with_compression) / 2.0, 1.0))
 
 
+def _average_optional_number(values: list[int | float | None]) -> float | None:
+    filtered = [float(value) for value in values if value is not None]
+    if not filtered:
+        return None
+    return sum(filtered) / len(filtered)
+
+
+def _token_breakdown(
+    *,
+    input_tokens: int | float | None,
+    cached_input_tokens: int | float | None,
+    output_tokens: int | float | None,
+    settings: Settings,
+) -> dict[str, float | int | None]:
+    weighted = compute_weighted_tokens(
+        input_tokens=int(input_tokens) if input_tokens is not None else None,
+        cached_input_tokens=int(cached_input_tokens) if cached_input_tokens is not None else None,
+        output_tokens=int(output_tokens) if output_tokens is not None else None,
+        settings=settings,
+    )
+    return {
+        "input": input_tokens,
+        "cache": cached_input_tokens,
+        "output": output_tokens,
+        "weighted": weighted,
+    }
+
+
+def _compressed_token_breakdown(
+    runs: list[dict[str, Any]],
+    settings: Settings,
+) -> dict[str, float | int | None]:
+    completed_runs = [row for row in runs if row["status"] == "completed"]
+    return _token_breakdown(
+        input_tokens=_average_optional_number(
+            [row.get("input_tokens") for row in completed_runs]
+        ),
+        cached_input_tokens=_average_optional_number(
+            [row.get("cached_input_tokens") for row in completed_runs]
+        ),
+        output_tokens=_average_optional_number(
+            [row.get("output_tokens") for row in completed_runs]
+        ),
+        settings=settings,
+    )
+
+
+def _token_savings(
+    *,
+    baseline_weighted: float | None,
+    compressed_weighted: float | None,
+) -> dict[str, float | None]:
+    if (
+        baseline_weighted is None
+        or compressed_weighted is None
+        or baseline_weighted <= 0
+    ):
+        return {
+            "weighted_saved": None,
+            "weighted_ratio": None,
+            "weighted_saved_percent": None,
+        }
+    saved = baseline_weighted - compressed_weighted
+    return {
+        "weighted_saved": saved,
+        "weighted_ratio": compressed_weighted / baseline_weighted,
+        "weighted_saved_percent": (saved / baseline_weighted) * 100.0,
+    }
+
+
 def build_category_score(
     *,
     benchmark_type: str,
@@ -160,6 +234,7 @@ def build_category_score(
 
     for case_row in case_rows:
         runs = case_result_rows.get(case_row["id"], [])
+        completed_runs = [row for row in runs if row["status"] == "completed"]
         resolved_runs = [row for row in runs if bool(row["resolved"])]
         miner_tokens = [
             value
@@ -181,6 +256,13 @@ def build_category_score(
             output_tokens=case_row["baseline_output_tokens"],
             settings=settings,
         )
+        baseline_tokens = _token_breakdown(
+            input_tokens=case_row["baseline_input_tokens"],
+            cached_input_tokens=case_row["baseline_cached_input_tokens"],
+            output_tokens=case_row["baseline_output_tokens"],
+            settings=settings,
+        )
+        compressed_tokens = _compressed_token_breakdown(runs, settings)
         x = int(case_row["baseline_resolved_count"])
         y = len(resolved_runs)
         score, pool, hard_boost = compute_swe_task_score(
@@ -196,11 +278,15 @@ def build_category_score(
         task_scores.append(
             TaskScore(
                 benchmark_case_id=case_row["id"],
+                instance_id=str(case_row.get("instance_id") or case_row["id"]),
                 benchmark_type=benchmark_type,
                 x=x,
                 y=y,
+                attempts=len(completed_runs),
                 tokens_without_compression=tok_b,
                 tokens_with_compression=tok_a,
+                baseline_tokens=baseline_tokens,
+                compressed_tokens=compressed_tokens,
                 score=score,
                 pool=pool,
                 hard_boost=hard_boost,
@@ -252,6 +338,11 @@ def build_category_score(
         "tasks": [
             {
                 "benchmark_case_id": item.benchmark_case_id,
+                "instance_id": item.instance_id,
+                "benchmark_type": item.benchmark_type,
+                "attempts": item.attempts,
+                "passed_without_compression": item.x,
+                "passed_with_compression": item.y,
                 "x": item.x,
                 "y": item.y,
                 "score": item.score,
@@ -259,6 +350,12 @@ def build_category_score(
                 "hard_boost": item.hard_boost,
                 "tokens_without_compression": item.tokens_without_compression,
                 "tokens_with_compression": item.tokens_with_compression,
+                "baseline_tokens": item.baseline_tokens,
+                "compressed_tokens": item.compressed_tokens,
+                "token_savings": _token_savings(
+                    baseline_weighted=item.baseline_tokens["weighted"],
+                    compressed_weighted=item.compressed_tokens["weighted"],
+                ),
                 "quality_ratio": item.quality_ratio,
                 "efficiency_ratio": item.efficiency_ratio,
                 "efficiency_score": item.efficiency_score,
@@ -286,6 +383,13 @@ def _build_explore_category_score(
             output_tokens=case_row["baseline_output_tokens"],
             settings=settings,
         )
+        baseline_tokens = _token_breakdown(
+            input_tokens=case_row["baseline_input_tokens"],
+            cached_input_tokens=case_row["baseline_cached_input_tokens"],
+            output_tokens=case_row["baseline_output_tokens"],
+            settings=settings,
+        )
+        compressed_tokens = _compressed_token_breakdown(runs, settings)
         miner_tokens = [
             value
             for value in (
@@ -331,6 +435,11 @@ def _build_explore_category_score(
         tasks.append(
             {
                 "benchmark_case_id": case_row["id"],
+                "instance_id": str(case_row.get("instance_id") or case_row["id"]),
+                "benchmark_type": benchmark_type,
+                "attempts": len(completed_runs),
+                "passed_without_compression": int(case_row.get("baseline_resolved_count") or 0),
+                "passed_with_compression": sum(1 for row in completed_runs if bool(row["resolved"])),
                 "score": score,
                 "normalized_score": max(-1.0, min(score / 2.0, 1.0)),
                 "baseline_quality": baseline_quality,
@@ -342,6 +451,12 @@ def _build_explore_category_score(
                 "efficiency_score": efficiency_score,
                 "tokens_without_compression": tok_b,
                 "tokens_with_compression": tok_a,
+                "baseline_tokens": baseline_tokens,
+                "compressed_tokens": compressed_tokens,
+                "token_savings": _token_savings(
+                    baseline_weighted=baseline_tokens["weighted"],
+                    compressed_weighted=compressed_tokens["weighted"],
+                ),
             }
         )
 
@@ -380,6 +495,111 @@ def _quality_from_rates(
     if hit_rate is None:
         return fallback
     return max(-1.0, min(float(hit_rate) - float(noise_rate or 0.0), 1.0))
+
+
+def _sum_optional_numbers(values: list[int | float | None]) -> float | None:
+    filtered = [float(value) for value in values if value is not None]
+    if not filtered:
+        return None
+    return sum(filtered)
+
+
+def _aggregate_detail_metrics(
+    *,
+    competition_row: dict[str, Any],
+    case_rows: list[dict[str, Any]],
+    result_rows: list[dict[str, Any]],
+    category_summaries: dict[str, Any],
+    overall_score: float,
+    quality_score: float,
+    efficiency_score: float,
+    screener_passed: bool,
+) -> dict[str, Any]:
+    task_details = [
+        task
+        for summary in category_summaries.values()
+        for task in summary.get("tasks", [])
+    ]
+    baseline_input = _sum_optional_numbers(
+        [case.get("baseline_input_tokens") for case in case_rows]
+    )
+    baseline_cache = _sum_optional_numbers(
+        [case.get("baseline_cached_input_tokens") for case in case_rows]
+    )
+    baseline_output = _sum_optional_numbers(
+        [case.get("baseline_output_tokens") for case in case_rows]
+    )
+    baseline_weighted = _sum_optional_numbers(
+        [
+            task.get("baseline_tokens", {}).get("weighted")
+            for task in task_details
+        ]
+    )
+    compressed_input = _sum_optional_numbers(
+        [
+            task.get("compressed_tokens", {}).get("input")
+            for task in task_details
+        ]
+    )
+    compressed_cache = _sum_optional_numbers(
+        [
+            task.get("compressed_tokens", {}).get("cache")
+            for task in task_details
+        ]
+    )
+    compressed_output = _sum_optional_numbers(
+        [
+            task.get("compressed_tokens", {}).get("output")
+            for task in task_details
+        ]
+    )
+    compressed_weighted = _sum_optional_numbers(
+        [
+            task.get("compressed_tokens", {}).get("weighted")
+            for task in task_details
+        ]
+    )
+    passed_without_compression = sum(
+        int(case.get("baseline_resolved_count") or 0)
+        for case in case_rows
+    )
+    passed_with_compression = sum(1 for row in result_rows if bool(row["resolved"]))
+    return {
+        "screener": {
+            "passed": screener_passed,
+            "status": "passed" if screener_passed else "failed",
+            "threshold": float(competition_row["screening_threshold"]),
+            "score": overall_score,
+        },
+        "tasks": len(case_rows),
+        "attempts": len(result_rows),
+        "passed_without_compression": passed_without_compression,
+        "passed_with_compression": passed_with_compression,
+        "tokens_without_compression": {
+            "input": baseline_input,
+            "cache": baseline_cache,
+            "output": baseline_output,
+            "weighted": baseline_weighted,
+        },
+        "tokens_with_compression": {
+            "input": compressed_input,
+            "cache": compressed_cache,
+            "output": compressed_output,
+            "weighted": compressed_weighted,
+        },
+        "baseline_weighted": baseline_weighted,
+        "total_weighted": compressed_weighted,
+        "token_savings": _token_savings(
+            baseline_weighted=baseline_weighted,
+            compressed_weighted=compressed_weighted,
+        ),
+        "scores": {
+            "overall": overall_score,
+            "quality": quality_score,
+            "efficiency": efficiency_score,
+        },
+        "task_details": task_details,
+    }
 
 
 def build_leaderboard_entry(
@@ -435,9 +655,28 @@ def build_leaderboard_entry(
     )
     screener_passed = overall_score >= float(competition_row["screening_threshold"])
     status = "qualified" if screener_passed else "not_qualified"
+    evaluation_details = _aggregate_detail_metrics(
+        competition_row=competition_row,
+        case_rows=case_rows,
+        result_rows=result_rows,
+        category_summaries=category_summaries,
+        overall_score=overall_score,
+        quality_score=quality_score,
+        efficiency_score=efficiency_score,
+        screener_passed=screener_passed,
+    )
 
     summary = {
         "competition_name": competition_row["name"],
+        "screener": evaluation_details["screener"],
+        "tasks": evaluation_details["tasks"],
+        "passed_without_compression": evaluation_details["passed_without_compression"],
+        "passed_with_compression": evaluation_details["passed_with_compression"],
+        "tokens_without_compression": evaluation_details["tokens_without_compression"],
+        "tokens_with_compression": evaluation_details["tokens_with_compression"],
+        "total_weighted": evaluation_details["total_weighted"],
+        "baseline_weighted": evaluation_details["baseline_weighted"],
+        "token_savings": evaluation_details["token_savings"],
         "attempt_count": len(result_rows),
         "completed_attempts": completed_attempts,
         "failed_attempts": failed_attempts,
@@ -450,6 +689,7 @@ def build_leaderboard_entry(
             "category_quality_scores": category_quality_scores,
             "category_efficiency_scores": category_efficiency_scores,
         },
+        "evaluation_details": evaluation_details,
         "category_summaries": category_summaries,
     }
 
