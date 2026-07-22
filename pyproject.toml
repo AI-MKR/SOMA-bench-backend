@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "soma-bench-backend"
+version = "0.1.0"
+description = "Local backend benchmark system for SOMA-style miner evaluation."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.116.0,<1.0.0",
+  "pydantic>=2.11.0,<3.0.0",
+  "uvicorn>=0.35.0,<1.0.0",
+]
+
+[tool.setuptools]
+packages = ["soma_bench_backend"]
