@@ -520,6 +520,8 @@ def _aggregate_detail_metrics(
         for summary in category_summaries.values()
         for task in summary.get("tasks", [])
     ]
+    evaluation_state = "scored" if screener_passed else "not_qualified"
+    evaluation_state_label = "scored" if screener_passed else "not qualified"
     baseline_input = _sum_optional_numbers(
         [case.get("baseline_input_tokens") for case in case_rows]
     )
@@ -565,6 +567,8 @@ def _aggregate_detail_metrics(
     )
     passed_with_compression = sum(1 for row in result_rows if bool(row["resolved"]))
     return {
+        "evaluation_state": evaluation_state,
+        "evaluation_state_label": evaluation_state_label,
         "screener": {
             "passed": screener_passed,
             "status": "passed" if screener_passed else "failed",
@@ -668,6 +672,10 @@ def build_leaderboard_entry(
 
     summary = {
         "competition_name": competition_row["name"],
+        "evaluation_state": evaluation_details["evaluation_state"],
+        "evaluation_state_label": evaluation_details["evaluation_state_label"],
+        "qualification_state": status,
+        "qualification_state_label": "qualified" if screener_passed else "not qualified",
         "screener": evaluation_details["screener"],
         "tasks": evaluation_details["tasks"],
         "passed_without_compression": evaluation_details["passed_without_compression"],
@@ -703,6 +711,8 @@ def build_leaderboard_entry(
         "quality_score": quality_score,
         "efficiency_score": efficiency_score,
         "status": status,
+        "evaluation_state": evaluation_details["evaluation_state"],
+        "evaluation_state_label": evaluation_details["evaluation_state_label"],
         "screener_passed": screener_passed,
         "category_scores": category_scores,
         "summary": summary,

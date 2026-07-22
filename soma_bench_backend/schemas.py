@@ -10,7 +10,8 @@ BenchmarkType = Literal["swebench_verified", "swe_explorer_explore", "swe_explor
 EvaluationBackend = Literal["soma_benchmark", "command"]
 EvaluationStatus = Literal["queued", "running", "completed", "failed"]
 CaseRunStatus = Literal["completed", "failed", "timed_out"]
-LeaderboardStatus = Literal["qualified", "not_qualified", "running", "failed"]
+EvaluationState = Literal["screening", "qualified", "not_qualified", "scored", "evaluating"]
+LeaderboardStatus = Literal["qualified", "not_qualified", "running", "failed", "screening", "evaluating", "scored"]
 
 
 class CompetitionCreate(BaseModel):
@@ -127,6 +128,8 @@ class EvaluationRead(BaseModel):
     competition_id: int
     submission_id: int
     status: EvaluationStatus
+    evaluation_state: EvaluationState
+    evaluation_state_label: str
     attempts_per_case: int
     timeout_seconds: float
     overall_score: float | None
@@ -149,6 +152,8 @@ class LeaderboardEntry(BaseModel):
     quality_score: float
     efficiency_score: float
     status: LeaderboardStatus
+    evaluation_state: EvaluationState
+    evaluation_state_label: str
     screener_passed: bool
     category_scores: dict[str, float]
     summary: dict[str, Any]

@@ -256,6 +256,8 @@ Leaderboard rows returned by `GET /competitions/{competition_id}/dashboard` incl
 Key fields:
 
 - `summary.screener`: pass/fail status for the submission, including failure reason when available.
+- `summary.evaluation_state`: lifecycle state: `screening`, `qualified`, `not_qualified`, `scored`, or `evaluating`.
+- `summary.evaluation_state_label`: display label for the lifecycle state, for example `not qualified`.
 - `summary.tasks`: number of benchmark tasks included in the score.
 - `summary.passed_without_compression`: baseline pass count across all attempts.
 - `summary.passed_with_compression`: compressed-miner pass count across all attempts.
@@ -271,6 +273,8 @@ Example shape:
 {
   "summary": {
     "screener": {"passed": true, "status": "passed", "reason": null},
+    "evaluation_state": "scored",
+    "evaluation_state_label": "scored",
     "tasks": 10,
     "passed_without_compression": 48,
     "passed_with_compression": 45,

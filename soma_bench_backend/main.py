@@ -21,6 +21,7 @@ from .db import (
     init_db,
     list_benchmark_cases,
     list_competitions,
+    list_latest_evaluations,
     list_leaderboard,
     list_submissions,
 )
@@ -275,7 +276,7 @@ def create_evaluation_endpoint(
             timeout_seconds=timeout_seconds,
         )
     executor.schedule(row["id"])
-    return EvaluationRead.model_validate(row)
+    return EvaluationRead.model_validate(_with_evaluation_state(row))
 
 
 @app.get("/evaluations/{evaluation_id}", response_model=EvaluationRead)
@@ -284,7 +285,7 @@ def get_evaluation_endpoint(evaluation_id: int) -> EvaluationRead:
         row = get_evaluation(db, evaluation_id)
         if row is None:
             raise HTTPException(status_code=404, detail="Evaluation not found.")
-    return EvaluationRead.model_validate(row)
+    return EvaluationRead.model_validate(_with_evaluation_state(row))
 
 
 @app.get(
@@ -311,15 +312,19 @@ def get_dashboard_endpoint(competition_id: int) -> DashboardPayload:
             raise HTTPException(status_code=404, detail="Competition not found.")
         submissions = list_submissions(db, competition_id)
         leaderboard_rows = list_leaderboard(db, competition_id)
+        latest_evaluations = list_latest_evaluations(db, competition_id)
         total_evaluations = count_evaluations(db, competition_id)
 
-    leaderboard = [LeaderboardEntry.model_validate(row) for row in leaderboard_rows]
+    leaderboard = _dashboard_leaderboard_entries(
+        submissions=submissions,
+        leaderboard_rows=leaderboard_rows,
+        latest_evaluations=latest_evaluations,
+    )
     status_counts = {
-        "qualified": sum(1 for row in leaderboard if row.status == "qualified"),
-        "not_qualified": sum(1 for row in leaderboard if row.status == "not_qualified"),
-        "screening": max(0, len(submissions) - len(leaderboard)),
+        state: sum(1 for row in leaderboard if row.evaluation_state == state)
+        for state in ["screening", "qualified", "not_qualified", "scored", "evaluating"]
     }
-    top_score = max((row.overall_score for row in leaderboard), default=None)
+    top_score = max((float(row["overall_score"]) for row in leaderboard_rows), default=None)
     payload = {
         "competition": CompetitionRead.model_validate(competition),
         "metrics": DashboardMetrics(
@@ -350,3 +355,139 @@ def _optional_float(value: Any) -> float | None:
     if value is None:
         return None
     return float(value)
+
+
+def _evaluation_state_from_row(
+    row: dict[str, Any] | None,
+    *,
+    has_leaderboard_score: bool = False,
+) -> tuple[str, str]:
+    if row is None:
+        return "screening", "screening"
+    if row["status"] == "queued":
+        return "screening", "screening"
+    if row["status"] == "running":
+        return "evaluating", "evaluating"
+    if row["status"] == "failed":
+        return "not_qualified", "not qualified"
+    if row["status"] == "completed":
+        if bool(row.get("qualified")):
+            return ("scored", "scored") if has_leaderboard_score else ("qualified", "qualified")
+        return "not_qualified", "not qualified"
+    return "screening", "screening"
+
+
+def _with_evaluation_state(
+    row: dict[str, Any],
+    *,
+    has_leaderboard_score: bool = False,
+) -> dict[str, Any]:
+    mutated = dict(row)
+    state, label = _evaluation_state_from_row(
+        row,
+        has_leaderboard_score=has_leaderboard_score,
+    )
+    mutated["evaluation_state"] = state
+    mutated["evaluation_state_label"] = label
+    return mutated
+
+
+def _dashboard_leaderboard_entries(
+    *,
+    submissions: list[dict[str, Any]],
+    leaderboard_rows: list[dict[str, Any]],
+    latest_evaluations: list[dict[str, Any]],
+) -> list[LeaderboardEntry]:
+    leaderboard_by_submission_id = {
+        int(row["submission_id"]): row
+        for row in leaderboard_rows
+    }
+    latest_evaluation_by_submission_id = {
+        int(row["submission_id"]): row
+        for row in latest_evaluations
+    }
+    entries: list[LeaderboardEntry] = []
+
+    for row in leaderboard_rows:
+        state = str(row.get("evaluation_state") or "")
+        if not state:
+            state, label = _evaluation_state_from_row(
+                latest_evaluation_by_submission_id.get(int(row["submission_id"])),
+                has_leaderboard_score=True,
+            )
+            row = {
+                **row,
+                "evaluation_state": state,
+                "evaluation_state_label": label,
+            }
+        entries.append(LeaderboardEntry.model_validate(row))
+
+    for submission in submissions:
+        submission_id = int(submission["id"])
+        if submission_id in leaderboard_by_submission_id:
+            continue
+        evaluation = latest_evaluation_by_submission_id.get(submission_id)
+        state, label = _evaluation_state_from_row(evaluation)
+        summary = {
+            "competition_name": "",
+            "evaluation_state": state,
+            "evaluation_state_label": label,
+            "screener": {
+                "passed": False,
+                "status": "pending" if state in {"screening", "evaluating"} else "failed",
+                "threshold": None,
+                "score": None,
+            },
+            "tasks": 0,
+            "passed_without_compression": 0,
+            "passed_with_compression": 0,
+            "tokens_without_compression": {
+                "input": None,
+                "cache": None,
+                "output": None,
+                "weighted": None,
+            },
+            "tokens_with_compression": {
+                "input": None,
+                "cache": None,
+                "output": None,
+                "weighted": None,
+            },
+            "total_weighted": None,
+            "baseline_weighted": None,
+            "evaluation_details": {
+                "evaluation_state": state,
+                "evaluation_state_label": label,
+                "task_details": [],
+            },
+        }
+        entries.append(
+            LeaderboardEntry.model_validate(
+                {
+                    "competition_id": int(submission["competition_id"]),
+                    "submission_id": submission_id,
+                    "evaluation_id": int(evaluation["id"]) if evaluation else 0,
+                    "miner_hotkey": submission["miner_hotkey"],
+                    "display_name": submission["display_name"] or submission["miner_hotkey"],
+                    "overall_score": -1.0,
+                    "quality_score": -1.0,
+                    "efficiency_score": -1.0,
+                    "status": state,
+                    "evaluation_state": state,
+                    "evaluation_state_label": label,
+                    "screener_passed": False,
+                    "category_scores": {},
+                    "summary": summary,
+                    "updated_at": evaluation["updated_at"] if evaluation else submission["created_at"],
+                }
+            )
+        )
+
+    return sorted(
+        entries,
+        key=lambda row: (
+            row.overall_score,
+            row.updated_at,
+        ),
+        reverse=True,
+    )

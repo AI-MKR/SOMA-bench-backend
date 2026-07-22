@@ -60,6 +60,14 @@ def _leaderboard_from_row(row: dict[str, Any]) -> dict[str, Any]:
     row["screener_passed"] = bool(row["screener_passed"])
     row["category_scores"] = _loads(row["category_scores_json"], {})
     row["summary"] = _loads(row["summary_json"], {})
+    row["evaluation_state"] = row["summary"].get(
+        "evaluation_state",
+        "scored" if row["status"] == "qualified" else row["status"],
+    )
+    row["evaluation_state_label"] = row["summary"].get(
+        "evaluation_state_label",
+        "not qualified" if row["evaluation_state"] == "not_qualified" else row["evaluation_state"],
+    )
     del row["category_scores_json"]
     del row["summary_json"]
     return row
@@ -470,6 +478,27 @@ def get_evaluation(db: sqlite3.Connection, evaluation_id: int) -> dict[str, Any]
         (evaluation_id,),
     ).fetchone()
     return None if row is None else _evaluation_from_row(row)
+
+
+def list_latest_evaluations(
+    db: sqlite3.Connection,
+    competition_id: int,
+) -> list[dict[str, Any]]:
+    rows = db.execute(
+        """
+        SELECT e.*
+        FROM evaluations e
+        JOIN (
+          SELECT submission_id, MAX(id) AS id
+          FROM evaluations
+          WHERE competition_id = ?
+          GROUP BY submission_id
+        ) latest ON latest.id = e.id
+        ORDER BY e.updated_at DESC, e.id DESC
+        """,
+        (competition_id,),
+    ).fetchall()
+    return [_evaluation_from_row(row) for row in rows]
 
 
 def set_evaluation_running(db: sqlite3.Connection, evaluation_id: int) -> None:
