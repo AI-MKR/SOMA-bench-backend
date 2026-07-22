@@ -10,8 +10,8 @@ BenchmarkType = Literal["swebench_verified", "swe_explorer_explore", "swe_explor
 EvaluationBackend = Literal["soma_benchmark", "command"]
 EvaluationStatus = Literal["queued", "running", "completed", "failed"]
 CaseRunStatus = Literal["completed", "failed", "timed_out"]
-EvaluationState = Literal["screening", "qualified", "not_qualified", "scored", "evaluating"]
-LeaderboardStatus = Literal["qualified", "not_qualified", "running", "failed", "screening", "evaluating", "scored"]
+EvaluationState = Literal["screening", "qualified", "not_qualified", "evaluating"]
+LeaderboardStatus = Literal["qualified", "not_qualified", "running", "failed", "screening", "evaluating"]
 
 
 class CompetitionCreate(BaseModel):

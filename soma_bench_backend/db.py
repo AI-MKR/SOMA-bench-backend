@@ -69,7 +69,7 @@ def _leaderboard_from_row(row: dict[str, Any]) -> dict[str, Any]:
     row["summary"] = _loads(row["summary_json"], {})
     row["evaluation_state"] = row["summary"].get(
         "evaluation_state",
-        "scored" if row["status"] == "qualified" else row["status"],
+        "qualified" if row["status"] == "qualified" else row["status"],
     )
     row["evaluation_state_label"] = row["summary"].get(
         "evaluation_state_label",

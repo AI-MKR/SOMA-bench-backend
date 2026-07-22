@@ -334,7 +334,7 @@ def get_dashboard_endpoint(competition_id: int) -> DashboardPayload:
     )
     status_counts = {
         state: sum(1 for row in leaderboard if row.evaluation_state == state)
-        for state in ["screening", "qualified", "not_qualified", "scored", "evaluating"]
+        for state in ["screening", "qualified", "not_qualified", "evaluating"]
     }
     top_score = max((float(row["overall_score"]) for row in leaderboard_rows), default=None)
     payload = {
@@ -384,7 +384,7 @@ def _evaluation_state_from_row(
         return "not_qualified", "not qualified"
     if row["status"] == "completed":
         if bool(row.get("qualified")):
-            return ("scored", "scored") if has_leaderboard_score else ("qualified", "qualified")
+            return "qualified", "qualified"
         return "not_qualified", "not qualified"
     return "screening", "screening"
 

@@ -7,6 +7,12 @@ from typing import Any
 
 from .config import Settings
 
+SCREENING_MIN_QUALITY_RATIO = 0.95
+SCREENING_WEIGHTED_REDUCTION = {
+    "swebench_verified": 0.10,
+    "swe_explorer_edit": 0.05,
+}
+
 
 @dataclass
 class TaskScore:
@@ -504,24 +510,165 @@ def _sum_optional_numbers(values: list[int | float | None]) -> float | None:
     return sum(filtered)
 
 
+def _screening_status_label(passed: bool) -> str:
+    return "passed" if passed else "failed"
+
+
+def _screening_detail_for_benchmark(
+    *,
+    benchmark_type: str,
+    category_summary: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if category_summary is None:
+        return {
+            "benchmark_type": benchmark_type,
+            "applicable": False,
+            "passed": True,
+            "status": "skipped",
+            "reason": "No tasks present for this benchmark type.",
+        }
+
+    tasks = list(category_summary.get("tasks", []))
+    passed_without_compression = sum(
+        int(task.get("passed_without_compression") or 0)
+        for task in tasks
+    )
+    passed_with_compression = sum(
+        int(task.get("passed_with_compression") or 0)
+        for task in tasks
+    )
+    baseline_weighted = _sum_optional_numbers(
+        [task.get("baseline_tokens", {}).get("weighted") for task in tasks]
+    )
+    compressed_weighted = _sum_optional_numbers(
+        [task.get("compressed_tokens", {}).get("weighted") for task in tasks]
+    )
+    quality_ratio = (
+        1.0
+        if passed_without_compression <= 0
+        else float(passed_with_compression) / float(passed_without_compression)
+    )
+    weighted_ratio = (
+        None
+        if baseline_weighted is None or compressed_weighted is None or baseline_weighted <= 0
+        else float(compressed_weighted) / float(baseline_weighted)
+    )
+    weighted_reduction = None if weighted_ratio is None else 1.0 - weighted_ratio
+
+    if benchmark_type == "swe_explorer_explore":
+        return {
+            "benchmark_type": benchmark_type,
+            "applicable": False,
+            "passed": True,
+            "status": "ignored",
+            "reason": "Explore tasks do not affect screening.",
+            "task_count": len(tasks),
+            "passed_without_compression": passed_without_compression,
+            "passed_with_compression": passed_with_compression,
+            "quality_ratio": quality_ratio,
+            "baseline_weighted": baseline_weighted,
+            "compressed_weighted": compressed_weighted,
+            "weighted_ratio": weighted_ratio,
+            "weighted_reduction": weighted_reduction,
+        }
+
+    required_reduction = SCREENING_WEIGHTED_REDUCTION[benchmark_type]
+    quality_passed = quality_ratio >= SCREENING_MIN_QUALITY_RATIO
+    token_passed = (
+        weighted_reduction is not None
+        and weighted_reduction >= required_reduction
+    )
+    passed = quality_passed and token_passed
+
+    reasons: list[str] = []
+    if not quality_passed:
+        reasons.append(
+            f"quality ratio {quality_ratio:.3f} is below required {SCREENING_MIN_QUALITY_RATIO:.3f}"
+        )
+    if not token_passed:
+        if weighted_reduction is None:
+            reasons.append("weighted token reduction could not be computed")
+        else:
+            reasons.append(
+                f"weighted token reduction {weighted_reduction:.3f} is below required {required_reduction:.3f}"
+            )
+
+    return {
+        "benchmark_type": benchmark_type,
+        "applicable": True,
+        "passed": passed,
+        "status": _screening_status_label(passed),
+        "reason": "; ".join(reasons) if reasons else "Passed screening gates.",
+        "task_count": len(tasks),
+        "passed_without_compression": passed_without_compression,
+        "passed_with_compression": passed_with_compression,
+        "quality_ratio": quality_ratio,
+        "quality_min_ratio": SCREENING_MIN_QUALITY_RATIO,
+        "quality_drop_limit": 1.0 - SCREENING_MIN_QUALITY_RATIO,
+        "quality_passed": quality_passed,
+        "baseline_weighted": baseline_weighted,
+        "compressed_weighted": compressed_weighted,
+        "weighted_ratio": weighted_ratio,
+        "weighted_reduction": weighted_reduction,
+        "required_weighted_reduction": required_reduction,
+        "token_passed": token_passed,
+    }
+
+
+def _build_screening_summary(
+    *,
+    category_summaries: dict[str, Any],
+) -> dict[str, Any]:
+    by_benchmark = {
+        benchmark_type: _screening_detail_for_benchmark(
+            benchmark_type=benchmark_type,
+            category_summary=category_summaries.get(benchmark_type),
+        )
+        for benchmark_type in (
+            "swebench_verified",
+            "swe_explorer_edit",
+            "swe_explorer_explore",
+        )
+    }
+    gating_details = [
+        detail
+        for benchmark_type, detail in by_benchmark.items()
+        if benchmark_type != "swe_explorer_explore" and detail["applicable"]
+    ]
+    passed = all(detail["passed"] for detail in gating_details) if gating_details else True
+    failed_reasons = [
+        f"{detail['benchmark_type']}: {detail['reason']}"
+        for detail in gating_details
+        if not detail["passed"]
+    ]
+    return {
+        "passed": passed,
+        "status": _screening_status_label(passed),
+        "reason": "Passed all screening gates." if passed else " | ".join(failed_reasons),
+        "quality_min_ratio": SCREENING_MIN_QUALITY_RATIO,
+        "weighted_reduction_requirements": dict(SCREENING_WEIGHTED_REDUCTION),
+        "benchmarks": by_benchmark,
+    }
+
+
 def _aggregate_detail_metrics(
     *,
-    competition_row: dict[str, Any],
     case_rows: list[dict[str, Any]],
     result_rows: list[dict[str, Any]],
     category_summaries: dict[str, Any],
     overall_score: float,
     quality_score: float,
     efficiency_score: float,
-    screener_passed: bool,
+    screening_summary: dict[str, Any],
 ) -> dict[str, Any]:
     task_details = [
         task
         for summary in category_summaries.values()
         for task in summary.get("tasks", [])
     ]
-    evaluation_state = "scored" if screener_passed else "not_qualified"
-    evaluation_state_label = "scored" if screener_passed else "not qualified"
+    screener_passed = bool(screening_summary["passed"])
+    evaluation_state = "qualified" if screener_passed else "not_qualified"
+    evaluation_state_label = "qualified" if screener_passed else "not qualified"
     baseline_input = _sum_optional_numbers(
         [case.get("baseline_input_tokens") for case in case_rows]
     )
@@ -569,12 +716,7 @@ def _aggregate_detail_metrics(
     return {
         "evaluation_state": evaluation_state,
         "evaluation_state_label": evaluation_state_label,
-        "screener": {
-            "passed": screener_passed,
-            "status": "passed" if screener_passed else "failed",
-            "threshold": float(competition_row["screening_threshold"]),
-            "score": overall_score,
-        },
+        "screener": screening_summary,
         "tasks": len(case_rows),
         "attempts": len(result_rows),
         "passed_without_compression": passed_without_compression,
@@ -657,17 +799,19 @@ def build_leaderboard_entry(
         if category_efficiency_scores
         else -1.0
     )
-    screener_passed = overall_score >= float(competition_row["screening_threshold"])
+    screening_summary = _build_screening_summary(
+        category_summaries=category_summaries,
+    )
+    screener_passed = bool(screening_summary["passed"])
     status = "qualified" if screener_passed else "not_qualified"
     evaluation_details = _aggregate_detail_metrics(
-        competition_row=competition_row,
         case_rows=case_rows,
         result_rows=result_rows,
         category_summaries=category_summaries,
         overall_score=overall_score,
         quality_score=quality_score,
         efficiency_score=efficiency_score,
-        screener_passed=screener_passed,
+        screening_summary=screening_summary,
     )
 
     summary = {

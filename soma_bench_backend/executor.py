@@ -183,8 +183,8 @@ class LocalBenchmarkExecutor:
                     connection,
                     evaluation_id=evaluation_id,
                     level="info",
-                    event="evaluation_scored",
-                    message="Evaluation scored and leaderboard entry updated.",
+                    event="screening_completed",
+                    message="Screening evaluation completed and leaderboard entry updated.",
                     details={
                         "overall_score": leaderboard_entry["overall_score"],
                         "quality_score": leaderboard_entry["quality_score"],
