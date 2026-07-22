@@ -44,17 +44,6 @@ class LocalBenchmarkExecutor:
                     connection, evaluation_row["competition_id"]
                 )
                 if submission_row is None or competition_row is None:
-                    db.insert_evaluation_log(
-                        connection,
-                        evaluation_id=evaluation_id,
-                        level="error",
-                        event="evaluation_failed",
-                        message="Missing submission or competition.",
-                        details={
-                            "submission_id": evaluation_row["submission_id"],
-                            "competition_id": evaluation_row["competition_id"],
-                        },
-                    )
                     db.fail_evaluation(
                         connection,
                         evaluation_id=evaluation_id,
@@ -65,14 +54,6 @@ class LocalBenchmarkExecutor:
                     connection, competition_row["id"]
                 )
                 if not case_rows:
-                    db.insert_evaluation_log(
-                        connection,
-                        evaluation_id=evaluation_id,
-                        level="error",
-                        event="evaluation_failed",
-                        message="Competition has no benchmark cases.",
-                        details={"competition_id": competition_row["id"]},
-                    )
                     db.fail_evaluation(
                         connection,
                         evaluation_id=evaluation_id,
@@ -80,78 +61,16 @@ class LocalBenchmarkExecutor:
                     )
                     return
                 db.set_evaluation_running(connection, evaluation_id)
-                db.insert_evaluation_log(
-                    connection,
-                    evaluation_id=evaluation_id,
-                    level="info",
-                    event="evaluation_started",
-                    message="Evaluation started.",
-                    details={
-                        "competition_id": competition_row["id"],
-                        "submission_id": submission_row["id"],
-                        "case_count": len(case_rows),
-                        "attempts_per_case": evaluation_row["attempts_per_case"],
-                        "timeout_seconds": evaluation_row["timeout_seconds"],
-                    },
-                )
 
             run_dir = self.settings.runs_dir / f"evaluation-{evaluation_id}"
             run_dir.mkdir(parents=True, exist_ok=True)
 
             for case_row in case_rows:
-                with db.connect(self.settings) as connection:
-                    db.insert_evaluation_log(
-                        connection,
-                        evaluation_id=evaluation_id,
-                        level="info",
-                        event="case_started",
-                        message=f"Started benchmark case {case_row['instance_id']}.",
-                        details={
-                            "benchmark_case_id": case_row["id"],
-                            "instance_id": case_row["instance_id"],
-                            "benchmark_type": case_row["benchmark_type"],
-                        },
-                    )
-                baseline_missing = (
-                    case_row["baseline_input_tokens"] is None
-                    or case_row["baseline_output_tokens"] is None
-                )
-                if baseline_missing:
-                    with db.connect(self.settings) as connection:
-                        db.insert_evaluation_log(
-                            connection,
-                            evaluation_id=evaluation_id,
-                            level="info",
-                            event="baseline_started",
-                            message=f"Started baseline run for {case_row['instance_id']}.",
-                            details={
-                                "benchmark_case_id": case_row["id"],
-                                "instance_id": case_row["instance_id"],
-                            },
-                        )
                 case_row = self._ensure_case_baseline(
                     case_row=case_row,
                     timeout_seconds=evaluation_row["timeout_seconds"],
                     run_dir=run_dir,
                 )
-                if baseline_missing:
-                    with db.connect(self.settings) as connection:
-                        db.insert_evaluation_log(
-                            connection,
-                            evaluation_id=evaluation_id,
-                            level="info",
-                            event="baseline_finished",
-                            message=f"Finished baseline run for {case_row['instance_id']}.",
-                            details={
-                                "benchmark_case_id": case_row["id"],
-                                "instance_id": case_row["instance_id"],
-                                "baseline_resolved_count": case_row["baseline_resolved_count"],
-                                "baseline_input_tokens": case_row["baseline_input_tokens"],
-                                "baseline_cached_input_tokens": case_row["baseline_cached_input_tokens"],
-                                "baseline_output_tokens": case_row["baseline_output_tokens"],
-                                "baseline_duration_seconds": case_row["baseline_duration_seconds"],
-                            },
-                        )
                 for attempt_index in range(1, evaluation_row["attempts_per_case"] + 1):
                     self._run_case_attempt(
                         evaluation_id=evaluation_id,
@@ -297,24 +216,6 @@ class LocalBenchmarkExecutor:
                 case_dir=case_dir,
                 baseline=baseline,
             )
-            if store_result:
-                with db.connect(self.settings) as connection:
-                    db.insert_evaluation_log(
-                        connection,
-                        evaluation_id=evaluation_id,
-                        level="info",
-                        event="attempt_started",
-                        message=f"Started attempt {attempt_index} for {case_row['instance_id']}.",
-                        details={
-                            "benchmark_case_id": case_row["id"],
-                            "instance_id": case_row["instance_id"],
-                            "benchmark_type": case_row["benchmark_type"],
-                            "attempt_index": attempt_index,
-                            "command_cwd": command_cwd,
-                            "case_dir": str(case_dir),
-                            "case_payload_path": str(case_payload_path),
-                        },
-                    )
             completed = subprocess.run(
                 command,
                 cwd=command_cwd,
@@ -392,33 +293,12 @@ class LocalBenchmarkExecutor:
                     error_text=error_text,
                     raw_result=raw_result,
                 )
-                log_level = "info" if status == "completed" else "error"
-                db.insert_evaluation_log(
-                    connection,
+                self._record_trace_logs(
+                    connection=connection,
                     evaluation_id=evaluation_id,
-                    level=log_level,
-                    event="attempt_finished",
-                    message=f"Finished attempt {attempt_index} for {case_row['instance_id']} with status {status}.",
-                    details={
-                        "benchmark_case_id": case_row["id"],
-                        "instance_id": case_row["instance_id"],
-                        "benchmark_type": case_row["benchmark_type"],
-                        "attempt_index": attempt_index,
-                        "status": status,
-                        "resolved": resolved,
-                        "input_tokens": input_tokens,
-                        "cached_input_tokens": cached_input_tokens,
-                        "output_tokens": output_tokens,
-                        "duration_seconds": duration_seconds,
-                        "files_hit_rate": files_hit_rate,
-                        "noise_rate": noise_rate,
-                        "patch_path": str(patch_path),
-                        "stdout_path": str(stdout_path),
-                        "stderr_path": str(stderr_path),
-                        "error_text": error_text,
-                        "raw_status": raw_result.get("status"),
-                        "raw_error": raw_result.get("error"),
-                    },
+                    case_row=case_row,
+                    attempt_index=attempt_index,
+                    raw_result=raw_result,
                 )
         return result
 
@@ -495,6 +375,54 @@ class LocalBenchmarkExecutor:
         if value is None:
             return None
         return float(value)
+
+    def _record_trace_logs(
+        self,
+        *,
+        connection: Any,
+        evaluation_id: int,
+        case_row: dict[str, Any],
+        attempt_index: int,
+        raw_result: dict[str, Any],
+    ) -> None:
+        trace = raw_result.get("trace")
+        if not isinstance(trace, dict):
+            artifacts = raw_result.get("artifacts")
+            trace = artifacts.get("trace") if isinstance(artifacts, dict) else None
+        if not isinstance(trace, dict):
+            return
+
+        for event_name in (
+            "context_before_compress",
+            "context_after_compress",
+            "model_reply",
+        ):
+            payload = trace.get(event_name)
+            if payload is None:
+                continue
+            if isinstance(payload, dict):
+                text = str(payload.get("text") or "")
+                details = dict(payload)
+            else:
+                text = str(payload)
+                details = {"text": text}
+            details.update(
+                {
+                    "benchmark_case_id": case_row["id"],
+                    "instance_id": case_row["instance_id"],
+                    "benchmark_type": case_row["benchmark_type"],
+                    "attempt_index": attempt_index,
+                    "length_chars": len(text),
+                }
+            )
+            db.insert_evaluation_log(
+                connection,
+                evaluation_id=evaluation_id,
+                level="info",
+                event=event_name,
+                message=f"Captured {event_name} for {case_row['instance_id']} attempt {attempt_index}.",
+                details=details,
+            )
 
     def _build_command(
         self,

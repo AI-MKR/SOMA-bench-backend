@@ -120,6 +120,7 @@ class CaseResultPayload(BaseModel):
     patch: str = ""
     metrics: CaseMetrics = Field(default_factory=CaseMetrics)
     notes: str = ""
+    trace: dict[str, Any] = Field(default_factory=dict)
     artifacts: dict[str, Any] = Field(default_factory=dict)
 
 
